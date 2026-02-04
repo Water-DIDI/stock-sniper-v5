@@ -33,18 +33,17 @@ def send_telegram_notify(msg):
 
 def get_strategy_params(ticker):
     """
-    對齊 TradingView V5 的參數邏輯
-    回傳: (rvol_th, rs_th, lookback_days, mode_name)
+    [更新] 回傳名稱與 TradingView 選單完全一致，方便對照
     """
     if ticker in MEGA_CAPS:
-        # 權值穩健: 突破20日高點
-        return 1.1, 0.0, 20, "🐢穩健"
+        # 對應 TV: 權值穩健 (如 TSM)
+        return 1.1, 0.0, 20, "🐢權值穩健"
     elif ticker in HIGH_BETA:
-        # 投機飆股: 突破10日高點
-        return 2.0, 2.0, 10, "🐇飆股"
+        # 對應 TV: 投機飆股 (如 小型股)
+        return 2.0, 2.0, 10, "🐇投機飆股"
     else:
-        # 循環動能: 突破14日高點
-        return 1.5, 1.0, 14, "🐆動能"
+        # 對應 TV: 循環動能 (如 MU)
+        return 1.5, 1.0, 14, "🐆循環動能"
 
 def fetch_data(tickers):
     if not tickers: return pd.DataFrame()
@@ -54,14 +53,13 @@ def fetch_data(tickers):
     except: return pd.DataFrame()
 
 def check_stock(ticker, df, spy_close):
-    # 確保數據夠長 (至少要能算 20日均線 + 突破)
     if len(df) < 50: return None
     
     close = df["Close"]
     high = df["High"]
     vol = df["Volume"]
     
-    # 1. 取得參數 (含 lookback)
+    # 1. 取得參數
     rvol_th, rs_th, lookback, mode_name = get_strategy_params(ticker)
 
     # 2. [V6] 3日趨勢確認
@@ -71,15 +69,11 @@ def check_stock(ticker, df, spy_close):
                    (close.iloc[-3] > ma20.iloc[-3])
     if not is_confirmed: return None 
 
-    # 3. [V7.1 NEW] 突破前高邏輯 (Donchian Breakout)
-    # 取得「昨天以前」的過去 N 天最高價
-    # shift(1) 代表不包含今天 (因為我們要看是不是今天突破過去)
+    # 3. [V7.1] 突破前高 (Donchian Breakout)
     highest_high = high.shift(1).rolling(window=lookback).max()
-    
-    # 判定：今天的收盤價 > 過去 N 天的最高價
     is_breakout = close.iloc[-1] > highest_high.iloc[-1]
     
-    if not is_breakout: return None # 沒突破就過濾掉
+    if not is_breakout: return None
 
     # 4. RS 動能
     idx = close.index.intersection(spy_close.index)
@@ -95,7 +89,6 @@ def check_stock(ticker, df, spy_close):
     # 6. 紅K
     is_red = close.iloc[-1] > df["Open"].iloc[-1]
 
-    # 最終篩選
     if rs_val > rs_th and rvol_val > rvol_th and is_red:
         return {
             "Mode": mode_name,
@@ -107,7 +100,7 @@ def check_stock(ticker, df, spy_close):
     return None
 
 def main():
-    print("🚀 開始掃描美股 (V7.1 Breakout Edition)...")
+    print("🚀 開始掃描美股 (V7.2 TV-Sync)...")
     all_stocks = []
     for s in SECTOR_CONFIG.values(): all_stocks.extend(s)
     all_stocks.append("SPY")
@@ -129,21 +122,23 @@ def main():
                 if t not in data.columns.levels[0]: continue
                 res = check_stock(t, data[t], spy_close)
                 if res:
-                    # 顯示資訊增加「突破天數」
-                    hit_list.append(f"*{t}* {res['Mode']} 破{res['Breakout']}日高 (+{res['Chg']}%)")
+                    # [更新] 訊息格式優化：讓模式名稱更顯眼
+                    # 範例：*TSM* [🐢權值穩健] 破20日高 (+1.5%)
+                    hit_list.append(f"*{t}* [{res['Mode']}] 破{res['Breakout']}日高 (+{res['Chg']}%)")
             except: continue
         if hit_list: results[sector] = hit_list
 
     today = datetime.now().strftime("%Y-%m-%d")
     if results:
-        msg = f"🚀 *美股狙擊手 V7.1* [{today}]\n"
-        msg += "🔥 *突破火箭名單 (Align with TV)*：\n"
+        msg = f"🚀 *美股狙擊手 V7.2* [{today}]\n"
+        msg += "🔥 *突破火箭名單 (附 TV 設定)*：\n"
         msg += "━━━━━━━━━━━━━━\n"
         for sec, stocks in results.items():
             msg += f"📂 *{sec}*\n" + "\n".join(stocks) + "\n\n"
-        msg += "━━━━━━━━━━━━━━\n請打開 TradingView 確認！"
+        msg += "━━━━━━━━━━━━━━\n"
+        msg += "💡 請在 TradingView 策略設定中，\n勾選對應的「股票屬性」模式。"
     else:
-        msg = f"💤 *美股狙擊手 V7.1* [{today}]\n今日無「突破前高 + 爆量」標的。\n市場盤整中，建議觀望。"
+        msg = f"💤 *美股狙擊手 V7.2* [{today}]\n今日無符合標的，建議空手觀望。"
     
     print(msg)
     send_telegram_notify(msg)
