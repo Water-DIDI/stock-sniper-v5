@@ -28,3 +28,17 @@ jobs:
         TG_TOKEN: ${{ secrets.TG_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       run: python scanner.py
+# ... 前面的步驟都一樣 ...
+    
+    - name: Run Scanner Script (Individual Stocks)
+      env:
+        TG_TOKEN: ${{ secrets.TG_TOKEN }}
+        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      run: python scanner.py
+
+    # 👇 新增這段：執行板塊熱力圖報告
+    - name: Run Sector Report (Heatmap)
+      env:
+        TG_TOKEN: ${{ secrets.TG_TOKEN }}
+        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      run: python sector_report.py
