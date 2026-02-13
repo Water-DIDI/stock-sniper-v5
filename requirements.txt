@@ -1,8 +1,6 @@
 streamlit
 yfinance
 pandas
-requests
-lxml
-matplotlib
-seaborn
+numpy
 plotly
+scipy
