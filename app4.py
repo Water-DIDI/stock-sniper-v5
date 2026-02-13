@@ -4,15 +4,30 @@ import pandas as pd
 import plotly.express as px
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="美股 V8 全方位戰情室", layout="wide", page_icon="🛡️")
-st.title("🛡️ 美股 V8 全方位戰情室")
+st.set_page_config(page_title="美股 V8.1 全方位戰情室", layout="wide", page_icon="🛡️")
+st.title("🛡️ 美股 V8.1 全方位戰情室")
 
-# --- 2. 資料定義 ---
+# --- 2. 內建操作指南 (UI 優化) ---
+with st.expander("🏆 點擊展開「提高勝率操作指南 (SOP)」", expanded=False):
+    st.markdown("""
+    ### 👨‍💻 工程師的獲利方程式：
+    1.  **先看天候 (Macro)**：
+        * 上方儀表板若 **VIX > 20** 或 **大盤顯示 🐻空頭** ➔ **現金為王**，減少操作。
+        * 若 **10年債 (TNX)** 急漲 ➔ **科技股 (XLK)** 易跌，避開成長股。
+    2.  **選對戰場 (Sector)**：
+        * 查看 **Tab 1 熱力圖**：只做 **1M (近1月)** 與 **3W (近1週)** 都是 **🟢 綠色** 的板塊。
+        * 查看 **RS 強度圖**：尋找曲線往 **右上角 ↗️** 噴出的板塊 (代表跑贏大盤)。
+    3.  **挑選時機 (Bias)**：
+        * 進入 **Tab 2 掃描**：若掃出個股，但 **乖離率 > 10% (過熱)** ➔ **不要追高**，掛單在 MA5/MA10 等待回測。
+    """)
+
+# --- 3. 資料定義 ---
 SECTOR_MAP = {
-    'XLK': '科技', 'SMH': '半導體', 'XLE': '能源', 'XLV': '醫療',
-    'XLF': '金融', 'XLI': '工業', 'XLP': '必需品', 'XLU': '公用',
-    'XLY': '非必需', 'XLB': '原物料', 'XLC': '通訊', 'IYR': '房地產',
-    'QQQ': '那斯達克', 'SPY': '標普'
+    'XLK': '科技 (Tech)', 'SMH': '半導體 (Chip)', 'XLE': '能源 (Energy)',
+    'XLV': '醫療 (Health)', 'XLF': '金融 (Finance)', 'XLI': '工業 (Industry)',
+    'XLP': '必需品 (Staples)', 'XLU': '公用事業 (Util)', 'XLY': '非必需 (Discret)',
+    'XLB': '原物料 (Material)', 'XLC': '通訊 (Comm)', 'IYR': '房地產 (Real Est)',
+    'QQQ': '那斯達克100', 'SPY': '標普500'
 }
 
 SECTOR_STOCKS = {
@@ -28,19 +43,26 @@ SECTOR_STOCKS = {
 MEGA_CAPS = ["TSM", "NVDA", "AAPL", "MSFT", "GOOGL", "META", "XOM", "CVX", "JPM", "GLD"]
 HIGH_BETA = ["MSTR", "COIN", "MARA", "CLSK", "PLTR", "SOFI", "AI"]
 
-# --- 3. 核心邏輯 ---
+# --- 4. 核心邏輯 ---
 
 def get_strategy_params(ticker):
     if ticker in MEGA_CAPS: return 1.1, 0.0, 20, "🐢權值穩健"
     elif ticker in HIGH_BETA: return 2.0, 2.0, 10, "🐇投機飆股"
     else: return 1.5, 1.0, 14, "🐆循環動能"
 
-@st.cache_data(ttl=1800) # 快取 30 分鐘
-def get_market_data():
-    """下載總經與板塊數據"""
-    # 增加 ^VIX, ^TNX (10年債), DX-Y.NYB (美元)
-    tickers = list(SECTOR_MAP.keys()) + ['^VIX', '^TNX', 'DX-Y.NYB']
-    data = yf.download(tickers, period="400d", auto_adjust=True)['Close']
+@st.cache_data(ttl=1800)
+def get_macro_data():
+    """下載總經數據 (獨立下載以防錯誤)"""
+    tickers = ['^VIX', '^TNX', 'DX-Y.NYB', 'SPY']
+    # 使用 ffill 處理假日缺值
+    data = yf.download(tickers, period="400d", auto_adjust=True)['Close'].ffill()
+    return data
+
+@st.cache_data(ttl=3600)
+def get_sector_data():
+    """下載板塊數據"""
+    tickers = list(SECTOR_MAP.keys())
+    data = yf.download(tickers, period="400d", auto_adjust=True)['Close'].ffill()
     return data
 
 def get_trend_emoji(price, ma20):
@@ -65,7 +87,7 @@ def check_stock(ticker, df, spy_close):
     rs_ratio = close.loc[idx] / spy_close.loc[idx]
     rs_val = (rs_ratio.iloc[-1] / rs_ratio.iloc[-21] - 1) * 100
     
-    # 4. 乖離率 (Bias) - 新增濾網
+    # 4. 乖離率 (Bias)
     bias = (close.iloc[-1] - ma20.iloc[-1]) / ma20.iloc[-1] * 100
     
     # 5. 量能 & 紅K
@@ -78,116 +100,125 @@ def check_stock(ticker, df, spy_close):
         return {
             "Mode": mode_name, "RS": rs_val, "RVOL": rvol_val, 
             "Breakout": lookback, "Price": close.iloc[-1],
-            "Bias": bias, # 回傳乖離率
+            "Bias": bias,
             "Chg": (close.iloc[-1]/close.iloc[-2]-1)*100
         }
     return None
 
-# --- 4. 介面開始 ---
+# --- 5. 介面開始 ---
 
-# [優化 1] 總經儀表板 (Macro Dashboard)
-with st.container():
-    st.markdown("### 🌍 市場天候監測 (Market Regime)")
-    try:
-        with st.spinner('連線華爾街數據庫...'):
-            df_all = get_market_data()
+# [區塊 1] 總經儀表板
+st.markdown("### 🌍 市場天候監測 (Market Regime)")
+try:
+    with st.spinner('連線華爾街數據庫 (Macro)...'):
+        df_macro = get_macro_data()
+    
+    m_cols = st.columns(4)
+    
+    # VIX
+    if '^VIX' in df_macro:
+        vix = df_macro['^VIX'].iloc[-1]
+        vix_prev = df_macro['^VIX'].iloc[-2]
+        vix_color = "inverse" if vix > 20 else "normal"
+        m_cols[0].metric("恐慌指數 (VIX)", f"{vix:.2f}", f"{vix - vix_prev:.2f}", delta_color=vix_color)
         
-        m_cols = st.columns(4)
-        
-        # VIX
-        if '^VIX' in df_all:
-            vix = df_all['^VIX'].iloc[-1]
-            vix_chg = df_all['^VIX'].iloc[-1] - df_all['^VIX'].iloc[-2]
-            vix_color = "inverse" if vix > 20 else "normal" # VIX 高代表危險
-            m_cols[0].metric("恐慌指數 (VIX)", f"{vix:.2f}", f"{vix_chg:.2f}", delta_color=vix_color)
-            
-        # 10年債 (TNX)
-        if '^TNX' in df_all:
-            tnx = df_all['^TNX'].iloc[-1]
-            tnx_chg = df_all['^TNX'].iloc[-1] - df_all['^TNX'].iloc[-2]
-            m_cols[1].metric("10年美債殖利率", f"{tnx:.2f}%", f"{tnx_chg:.2f}", delta_color="inverse")
+    # 10年債
+    if '^TNX' in df_macro:
+        tnx = df_macro['^TNX'].iloc[-1]
+        tnx_prev = df_macro['^TNX'].iloc[-2]
+        m_cols[1].metric("10年美債殖利率", f"{tnx:.2f}%", f"{tnx - tnx_prev:.2f}", delta_color="inverse")
 
-        # 美元 (DXY)
-        if 'DX-Y.NYB' in df_all:
-            dxy = df_all['DX-Y.NYB'].iloc[-1]
-            dxy_chg = df_all['DX-Y.NYB'].iloc[-1] - df_all['DX-Y.NYB'].iloc[-2]
-            m_cols[2].metric("美元指數 (DXY)", f"{dxy:.2f}", f"{dxy_chg:.2f}")
+    # 美元
+    if 'DX-Y.NYB' in df_macro:
+        dxy = df_macro['DX-Y.NYB'].iloc[-1]
+        dxy_prev = df_macro['DX-Y.NYB'].iloc[-2]
+        m_cols[2].metric("美元指數 (DXY)", f"{dxy:.2f}", f"{dxy - dxy_prev:.2f}")
 
-        # SPY 狀態
-        if 'SPY' in df_all:
-            spy_p = df_all['SPY'].iloc[-1]
-            spy_ma20 = df_all['SPY'].rolling(20).mean().iloc[-1]
-            trend = "🐂 多頭" if spy_p > spy_ma20 else "🐻 空頭"
-            m_cols[3].metric("大盤趨勢 (SPY)", trend, f"{(spy_p/df_all['SPY'].iloc[-2]-1)*100:.2f}%")
-            
-        st.markdown("---")
+    # SPY 狀態
+    if 'SPY' in df_macro:
+        spy_p = df_macro['SPY'].iloc[-1]
+        spy_ma20 = df_macro['SPY'].rolling(20).mean().iloc[-1]
+        trend = "🐂 多頭" if spy_p > spy_ma20 else "🐻 空頭"
+        m_cols[3].metric("大盤趨勢 (SPY)", trend, f"{(spy_p/df_macro['SPY'].iloc[-2]-1)*100:.2f}%")
         
-    except Exception as e:
-        st.error(f"總經數據載入失敗: {e}")
+    st.markdown("---")
+    
+except Exception as e:
+    st.error(f"總經數據載入失敗 (請稍後再試): {e}")
 
 # 分頁區
 tab1, tab2 = st.tabs(["📊 板塊戰情室 (Sector)", "🚀 個股狙擊手 (Scanner)"])
 
 # ==========================================
-# Tab 1: 板塊 (優化：相對強度圖)
+# Tab 1: 板塊 (熱力圖修復版)
 # ==========================================
 with tab1:
     st.markdown("### 資金流向熱力榜")
-    periods = {'1W': 5, '1M': 21, '3M': 63, '6M': 126, '12M': 252}
-    res_data = {}
-    curr = df_all.iloc[-1]
-    
-    for t in SECTOR_MAP.keys():
-        if t not in df_all: continue
-        row = {}
-        for p_name, p_days in periods.items():
-            if len(df_all) > p_days:
-                prev = df_all[t].iloc[-p_days]
-                row[p_name] = (curr[t] - prev) / prev
-            else: row[p_name] = 0.0
-        res_data[f"{t} {SECTOR_MAP[t]}"] = row
+    try:
+        with st.spinner('分析板塊資金流向...'):
+            df_sector = get_sector_data()
 
-    df_ret = pd.DataFrame.from_dict(res_data, orient='index').sort_values(by='1M', ascending=False)
-    st.dataframe(df_ret.style.format("{:.2%}").background_gradient(cmap='RdYlGn', vmin=-0.1, vmax=0.1), use_container_width=True)
+        periods = {'1W': 5, '1M': 21, '3M': 63, '6M': 126, '9M': 189, '12M': 252}
+        res_data = {}
+        curr = df_sector.iloc[-1]
+        
+        for t in SECTOR_MAP.keys():
+            if t not in df_sector: continue
+            row = {}
+            for p_name, p_days in periods.items():
+                if len(df_sector) > p_days:
+                    prev = df_sector[t].iloc[-p_days]
+                    row[p_name] = (curr[t] - prev) / prev
+                else: row[p_name] = 0.0
+            res_data[f"{t} {SECTOR_MAP[t]}"] = row
 
-    # [優化 2] 相對強度趨勢圖 (Relative Strength)
-    st.markdown("---")
-    st.subheader("📈 真實強度分析 (Relative Strength vs SPY)")
-    st.caption("💡 曲線向上代表「跑贏大盤」，向下代表「跑輸大盤」。請尋找往右上角噴出的板塊。")
-    
-    default_sectors = ['XLE', 'XLK', 'SMH', 'XLU']
-    selected = st.multiselect("選擇板塊:", list(SECTOR_MAP.keys()), default=[k for k in default_sectors if k in df_all])
-    
-    if selected and 'SPY' in df_all:
-        lookback = st.slider("回測天數", 30, 365, 120)
-        # 計算 RS Ratio: 板塊股價 / SPY股價
-        rs_data = pd.DataFrame()
-        for s in selected:
-            rs_data[s] = df_all[s] / df_all['SPY']
+        df_ret = pd.DataFrame.from_dict(res_data, orient='index').sort_values(by='1M', ascending=False)
+        st.dataframe(df_ret.style.format("{:.2%}").background_gradient(cmap='RdYlGn', vmin=-0.1, vmax=0.1), use_container_width=True, height=600)
+
+        # [優化] 相對強度趨勢圖
+        st.markdown("---")
+        st.subheader("📈 真實強度分析 (RS vs SPY)")
         
-        chart_data = rs_data.iloc[-lookback:].copy()
-        # 歸一化
-        chart_data = (chart_data / chart_data.iloc[0] - 1) * 100
+        default_sectors = ['XLE', 'XLK', 'SMH', 'XLU']
+        selected = st.multiselect("選擇板塊:", list(SECTOR_MAP.keys()), default=[k for k in default_sectors if k in df_sector])
         
-        fig = px.line(chart_data, title=f"相對 SPY 強度表現 (%)")
-        st.plotly_chart(fig, use_container_width=True)
+        if selected and 'SPY' in df_macro:
+            lookback = st.slider("回測天數", 30, 365, 120)
+            # 這裡需要對齊索引
+            common_idx = df_sector.index.intersection(df_macro.index)
+            sec_aligned = df_sector.loc[common_idx]
+            spy_aligned = df_macro['SPY'].loc[common_idx]
+            
+            rs_data = pd.DataFrame()
+            for s in selected:
+                rs_data[s] = sec_aligned[s] / spy_aligned
+            
+            chart_data = rs_data.iloc[-lookback:].copy()
+            chart_data = (chart_data / chart_data.iloc[0] - 1) * 100
+            
+            fig = px.line(chart_data, title=f"相對 SPY 強度表現 (%)")
+            st.plotly_chart(fig, use_container_width=True)
+            
+    except Exception as e:
+        st.error(f"板塊數據載入錯誤: {e}")
 
 # ==========================================
-# Tab 2: 個股 (優化：乖離率 Bias)
+# Tab 2: 個股 (含紅綠燈 & Bias)
 # ==========================================
 with tab2:
-    st.markdown("### V8.0 智能個股掃描")
+    st.markdown("### V8.1 智能個股掃描")
     
-    # 紅綠燈
-    st.info("🚦 **板塊紅綠燈**")
-    cols = st.columns(4)
-    key_sectors = ['SMH', 'XLK', 'XLE', 'XLU']
-    for i, ticker in enumerate(key_sectors):
-        if ticker in df_all:
-            p = df_all[ticker].iloc[-1]
-            ma20 = df_all[ticker].rolling(20).mean().iloc[-1]
-            cols[i].metric(f"{ticker}", f"{p:.2f}", get_trend_emoji(p, ma20))
-    st.markdown("---")
+    # 紅綠燈 (使用 Sector Data)
+    if 'df_sector' in locals() and not df_sector.empty:
+        st.info("🚦 **板塊紅綠燈 (掃描前確認)**")
+        cols = st.columns(4)
+        key_sectors = ['SMH', 'XLK', 'XLE', 'XLU']
+        for i, ticker in enumerate(key_sectors):
+            if ticker in df_sector:
+                p = df_sector[ticker].iloc[-1]
+                ma20 = df_sector[ticker].rolling(20).mean().iloc[-1]
+                cols[i].metric(f"{ticker}", f"{p:.2f}", get_trend_emoji(p, ma20))
+        st.markdown("---")
 
     if st.button("🚀 開始掃描 (Start Scan)"):
         st.text("⏳ 掃描數據中...")
@@ -207,14 +238,15 @@ with tab2:
                             if t not in data.columns.levels[0]: continue
                             res = check_stock(t, data[t], spy_close)
                             if res:
-                                # [優化 3] 乖離率過大警示
-                                bias_str = f"{res['Bias']:.1f}%"
-                                if res['Bias'] > 10: bias_str += " ⚠️過熱"
+                                # 乖離率過大警示
+                                bias_val = res['Bias']
+                                bias_str = f"{bias_val:.1f}%"
+                                if bias_val > 10: bias_str += " ⚠️"
                                 
                                 results.append({
                                     "板塊": sector, "代號": t, 
                                     "價格": f"{res['Price']:.2f}", 
-                                    "乖離率(Bias)": bias_str, # 新欄位
+                                    "乖離率": bias_str,
                                     "RS值": f"{res['RS']:.2f}",
                                     "模式": res['Mode']
                                 })
@@ -223,6 +255,5 @@ with tab2:
                 if results:
                     st.success(f"🎉 發現 {len(results)} 檔火箭")
                     st.dataframe(pd.DataFrame(results), use_container_width=True)
-                    st.caption("⚠️ **乖離率 > 10%** 代表短線過熱，建議等待回測 MA5/MA10 再佈局，不要追高。")
                 else: st.warning("💤 無訊號")
         except Exception as e: st.error(f"錯誤: {e}")
