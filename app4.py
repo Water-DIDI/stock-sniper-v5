@@ -7,8 +7,8 @@ import plotly.graph_objects as go
 from scipy.stats import norm
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="V10.3 量子戰情室 (Stable)", layout="wide", page_icon="⚛️")
-st.title("⚛️ V10.3 量子對沖基金戰情室 (Stable)")
+st.set_page_config(page_title="V10.4 量子戰情室 (Final)", layout="wide", page_icon="⚛️")
+st.title("⚛️ V10.4 量子對沖基金戰情室 (Final Stable)")
 
 # --- 2. 策略參數 ---
 SECTOR_MAP = {
@@ -19,12 +19,14 @@ SECTOR_MAP = {
 BENCHMARK = 'SPY'
 RISK_FREE_RATE = 0.04 
 
-# --- 3. 高速數據引擎 ---
+# --- 3. 高速數據引擎 (防彈版) ---
 @st.cache_data(ttl=3600)
 def get_quant_data():
     tickers = list(SECTOR_MAP.keys()) + [BENCHMARK, '^VIX']
+    # 下載數據
     data = yf.download(tickers, period="5y", auto_adjust=True)
     
+    # 處理 yfinance 多層索引問題
     if isinstance(data.columns, pd.MultiIndex):
         try:
             df = data['Close'].copy()
@@ -33,17 +35,25 @@ def get_quant_data():
     else:
         df = data['Close'].copy()
     
-    df = df.ffill().dropna()
+    # [Fix] 強制轉為數值，遇到非數值轉為 NaN，確保沒有 Object 混入
+    df = df.apply(pd.to_numeric, errors='coerce')
+    
+    # 填補空值並刪除全空的列
+    df = df.ffill().dropna(how='all')
+    
+    # 確保 Index 是 DatetimeIndex
+    df.index = pd.to_datetime(df.index)
+    
     return df
 
-# --- 4. 量化邏輯核心 ---
+# --- 4. 量化邏輯核心 (零污染版) ---
 
 def run_backtest(df_in, lookback_1m=21, lookback_3m=63, lookback_6m=126, top_n=3):
     """
-    高速向量化回測引擎
-    [Fix V10.3]: 使用 df.copy() 防止修改全域快取數據導致的 Type Error
+    高速向量化回測引擎 (V10.4 零副作用版)
     """
-    df = df_in.copy() # <--- 關鍵修復：建立副本，戴手套開刀
+    # 建立副本，確保不汙染快取
+    df = df_in.copy()
     
     # 1. 計算動能分數
     ret_1m = df.pct_change(lookback_1m)
@@ -60,12 +70,20 @@ def run_backtest(df_in, lookback_1m=21, lookback_3m=63, lookback_6m=126, top_n=3
     vix_calm = vix.rolling(5).mean() < vix.rolling(20).mean()
     risk_on = regime_bull & vix_calm
     
-    # 3. 模擬換倉
-    df['YYYYMM'] = df.index.to_period('M') # 這行之前會汙染全域變數，現在只會影響副本
-    rebalance_dates = df.groupby('YYYYMM').apply(lambda x: x.index[-1]).values
+    # 3. 抓取換倉日 (使用最安全的迴圈法，避開 Period 型態錯誤)
+    # 我們只看 index，不把週期寫入 dataframe，避免 Cannot aggregate 錯誤
+    unique_months = df.index.to_period('M').unique()
+    rebalance_dates = []
     
-    # 不需要再 drop YYYYMM 了，因為這是副本，用完即丟
-    
+    for m in unique_months:
+        # 找出該月份在 df 中的最後一個交易日
+        # 使用 boolean masking 絕對安全
+        mask = (df.index.to_period('M') == m)
+        if mask.any():
+            last_date = df.index[mask][-1]
+            rebalance_dates.append(last_date)
+            
+    # 4. 逐月回測
     strategy_returns = pd.Series(0.0, index=df.index)
     positions_history = {} 
     
@@ -73,25 +91,38 @@ def run_backtest(df_in, lookback_1m=21, lookback_3m=63, lookback_6m=126, top_n=3
         curr_date = rebalance_dates[i]
         next_date = rebalance_dates[i+1]
         
+        # 確保日期有效 (因為 pct_change 前期會有 NaN)
         if curr_date not in score.index: continue
+        
+        # 取得該月份的分數 row
+        # 這裡需注意：如果 score 在該日全是 NaN (例如數據剛開始)，跳過
+        current_scores = score.loc[curr_date]
+        if current_scores.isna().all(): continue
 
         mask = (df.index > curr_date) & (df.index <= next_date)
         
         if risk_on.loc[curr_date]:
-            current_scores = score.loc[curr_date]
-            valid_scores = current_scores.drop([BENCHMARK, '^VIX', 'YYYYMM'], errors='ignore')
+            # 排除非板塊
+            valid_scores = current_scores.drop([BENCHMARK, '^VIX'], errors='ignore')
             
+            # 50MA 濾網
             current_prices = df.loc[curr_date]
             ma50 = df.rolling(50).mean().loc[curr_date]
             
-            # 確保只比較數值型態的欄位
-            numeric_cols = valid_scores.index
-            valid_scores = valid_scores[current_prices[numeric_cols] > ma50[numeric_cols]]
+            # 確保欄位對齊
+            common_cols = valid_scores.index.intersection(current_prices.index)
+            valid_scores = valid_scores.loc[common_cols]
             
+            # 價格 > 50MA
+            cond_ma = current_prices[common_cols] > ma50[common_cols]
+            valid_scores = valid_scores[cond_ma]
+            
+            # 取 Top N
             top_sectors = valid_scores.nlargest(top_n).index.tolist()
             positions_history[next_date] = top_sectors
             
             if top_sectors:
+                # 計算平均報酬
                 sector_rets = df.loc[mask, top_sectors].pct_change().mean(axis=1)
                 strategy_returns.loc[mask] = sector_rets.fillna(0)
             else:
@@ -100,12 +131,14 @@ def run_backtest(df_in, lookback_1m=21, lookback_3m=63, lookback_6m=126, top_n=3
             positions_history[next_date] = ['CASH (Risk Off)']
             strategy_returns.loc[mask] = 0.0
 
+    # 計算淨值
     strategy_equity = (1 + strategy_returns).cumprod()
     benchmark_equity = (1 + df[BENCHMARK].pct_change()).cumprod()
     
-    # 正規化
-    strategy_equity = strategy_equity / strategy_equity.iloc[0]
-    benchmark_equity = benchmark_equity / benchmark_equity.iloc[0]
+    # 正規化起點
+    if not strategy_equity.empty:
+        strategy_equity = strategy_equity / strategy_equity.iloc[0]
+        benchmark_equity = benchmark_equity / benchmark_equity.iloc[0]
     
     return strategy_equity, benchmark_equity, positions_history, strategy_returns
 
@@ -127,7 +160,7 @@ def monte_carlo_sim(returns, n_sims=1000, days=126):
 # --- 5. 介面佈局 ---
 
 try:
-    with st.spinner('啟動量子運算核心...'):
+    with st.spinner('啟動 V10.4 量子核心 (數據清洗與下載)...'):
         df = get_quant_data()
     
     if df.empty:
@@ -154,9 +187,14 @@ try:
         st.subheader("📡 市場即時訊號")
         spy = df[BENCHMARK]
         vix = df['^VIX']
-        is_bull = (spy.iloc[-1] > spy.rolling(200).mean().iloc[-1]) and \
-                  (vix.rolling(5).mean().iloc[-1] < vix.rolling(20).mean().iloc[-1])
         
+        # 確保有足夠數據計算 MA
+        if len(df) > 200:
+            is_bull = (spy.iloc[-1] > spy.rolling(200).mean().iloc[-1]) and \
+                      (vix.rolling(5).mean().iloc[-1] < vix.rolling(20).mean().iloc[-1])
+        else:
+            is_bull = False # 數據不足預設保守
+            
         c1, c2 = st.columns([1, 3])
         with c1:
             if is_bull:
@@ -165,21 +203,22 @@ try:
                 st.error("🔴 **RISK OFF**\n\n建議：現金/防禦")
         with c2:
             if positions:
-                last_date = pd.to_datetime(max(positions.keys()))
+                # [Fix] 強制轉型 datetime 防止 numpy 報錯
+                last_date_obj = pd.to_datetime(max(positions.keys()))
                 latest_pos = positions[max(positions.keys())]
-                st.info(f"📋 **本月模型建議持倉 ({last_date.strftime('%Y-%m-%d')})**: {', '.join(latest_pos)}")
+                st.info(f"📋 **本月模型建議持倉 ({last_date_obj.strftime('%Y-%m-%d')})**: {', '.join(latest_pos)}")
             else:
                 st.warning("數據不足以產生持倉建議")
 
         st.markdown("---")
-        st.caption("板塊動能掃描")
+        st.caption("板塊動能掃描 (由強至弱)")
         
-        # [Fix V10.3]: 確保這裡使用的 df 是乾淨的，沒有被 run_backtest 汙染
+        # 安全取得最新數據
         curr = df.iloc[-1]
         prev_1m = df.iloc[-21]
         chg = (curr - prev_1m) / prev_1m
         
-        # 只取板塊，排除 SPY, VIX
+        # 只顯示板塊
         target_cols = [c for c in SECTOR_MAP.keys() if c in chg.index]
         sec_chg = chg[target_cols].sort_values(ascending=False)
         
@@ -211,6 +250,7 @@ try:
         st.markdown("#### 📜 換倉歷史記錄")
         if positions:
             rec_pos = pd.DataFrame.from_dict(positions, orient='index').tail(6)
+            # [Fix] 索引轉字串防止格式錯誤
             rec_pos.index = pd.to_datetime(rec_pos.index).strftime('%Y-%m-%d')
             st.table(rec_pos)
 
@@ -220,8 +260,11 @@ try:
         sims = monte_carlo_sim(strat_rets, days=sim_days)
         
         fig_mc = go.Figure()
-        for i in range(min(50, sims.shape[1])):
+        # 畫前 50 條
+        limit_n = min(50, sims.shape[1])
+        for i in range(limit_n):
             fig_mc.add_trace(go.Scatter(y=sims[:, i], mode='lines', line=dict(width=1), opacity=0.3, showlegend=False))
+        
         avg_path = sims.mean(axis=1)
         fig_mc.add_trace(go.Scatter(y=avg_path, mode='lines', line=dict(color='yellow', width=3), name='平均預期'))
         st.plotly_chart(fig_mc, use_container_width=True)
@@ -237,7 +280,7 @@ try:
         st.subheader("🧮 參數敏感度")
         if st.button("🚀 開始運算"):
             results = {}
-            with st.spinner("運算中..."):
+            with st.spinner("量子矩陣運算中..."):
                 for s in [10, 21, 42]:
                     row = {}
                     for l in [63, 126, 200]:
@@ -245,10 +288,16 @@ try:
                             row[l] = 0
                             continue
                         s_eq, _, _, _ = run_backtest(df, lookback_1m=s, lookback_3m=(s+l)//2, lookback_6m=l)
-                        ann = (s_eq.iloc[-1])**(252/len(s_eq)) - 1 if len(s_eq) > 0 else 0
+                        # 安全計算 CAGR
+                        if len(s_eq) > 0 and s_eq.iloc[-1] > 0:
+                            ann = (s_eq.iloc[-1])**(252/len(s_eq)) - 1
+                        else:
+                            ann = 0
                         row[f"長週期 {l}"] = ann
                     results[f"短週期 {s}"] = row
             st.dataframe(pd.DataFrame(results).T.style.format("{:.2%}").background_gradient(cmap='RdYlGn'), use_container_width=True)
 
 except Exception as e:
-    st.error(f"錯誤: {e}")
+    st.error(f"系統發生錯誤: {e}")
+    # 印出少量 Debug 資訊供參考
+    st.text(str(e))
